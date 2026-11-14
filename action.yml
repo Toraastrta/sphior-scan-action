@@ -1,0 +1,105 @@
+# SPHIOR CODE Security Scan — GitHub Action
+#
+# Runs the deterministic SPHIOR CODE engine (@sphior/scan) on the checked-out repository,
+# writes SARIF, optionally uploads it to GitHub code scanning, writes a job summary and
+# fails the job when a finding reaches the chosen severity.
+#
+# Security notes for reviewers:
+# - Inputs are never interpolated into shell scripts; they reach the scripts as environment
+#   variables and are validated there (version, severity, path).
+# - Third-party actions are pinned to a full commit SHA.
+
+name: "SPHIOR CODE Security Scan"
+description: "Find hard-coded secrets, insecure code and taint flows on every push and pull request. Deterministic, local, no account."
+author: "SPHIOR"
+
+branding:
+  icon: "shield"
+  color: "gray-dark"
+
+inputs:
+  path:
+    description: "Directory to scan, relative to the repository root."
+    required: false
+    default: "."
+  fail-on:
+    description: "Fail the job when a finding is at or above this severity: critical, high, medium, low, info, or none to never fail."
+    required: false
+    default: "high"
+  sarif-file:
+    description: "Where to write the SARIF 2.1.0 report."
+    required: false
+    default: "sphior-code.sarif"
+  upload-sarif:
+    description: "Upload the SARIF to GitHub code scanning: auto (public repositories only), true, or false. Private repositories need GitHub Advanced Security."
+    required: false
+    default: "auto"
+  version:
+    description: "Version of @sphior/scan to run. Pin it so results only change when you change it."
+    required: false
+    default: "0.1.9"
+
+outputs:
+  findings:
+    description: "Total number of findings."
+    value: ${{ steps.scan.outputs.findings }}
+  critical:
+    description: "Number of critical findings."
+    value: ${{ steps.scan.outputs.critical }}
+  high:
+    description: "Number of high findings."
+    value: ${{ steps.scan.outputs.high }}
+  medium:
+    description: "Number of medium findings."
+    value: ${{ steps.scan.outputs.medium }}
+  low:
+    description: "Number of low and info findings."
+    value: ${{ steps.scan.outputs.low }}
+  sarif-file:
+    description: "Path of the SARIF report."
+    value: ${{ steps.scan.outputs.sarif-file }}
+
+runs:
+  using: "composite"
+  steps:
+    # Node.js 18+ is on GitHub-hosted runners; set it up only when a self-hosted runner lacks it.
+    - id: node
+      shell: bash
+      run: |
+        if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)'; then
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - if: steps.node.outputs.needed == 'true'
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: "22"
+
+    # Scan, rewrite paths to the repository root, count by severity, write the job summary.
+    # The gate itself runs last so the SARIF upload happens even when the scan finds something.
+    - id: scan
+      shell: bash
+      env:
+        SPHIOR_PATH: ${{ inputs.path }}
+        SPHIOR_FAIL_ON: ${{ inputs.fail-on }}
+        SPHIOR_SARIF: ${{ inputs.sarif-file }}
+        SPHIOR_VERSION: ${{ inputs.version }}
+        SPHIOR_UPLOAD: ${{ inputs.upload-sarif }}
+        SPHIOR_REPO_PRIVATE: ${{ github.event.repository.private }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/scan.sh"
+
+    - if: always() && steps.scan.outputs.upload == 'true'
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: sphior-code
+
+    - if: steps.scan.outputs.gate == 'fail'
+      shell: bash
+      env:
+        SPHIOR_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "::error title=SPHIOR CODE::Findings at or above '${SPHIOR_FAIL_ON}' were found. See the job summary for the list."
+        exit 1
